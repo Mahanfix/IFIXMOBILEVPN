@@ -34,7 +34,7 @@ apt-get autoclean -y -qq 2>/dev/null || true
 # بروزرسانی
 print_info "بروزرسانی سیستم..."
 apt-get update -qq
-DEBIAN_FRONTEND=noninteractive apt-get upgrade -y -qq -o Dpkg::Options::="--force-confnew"
+DEBIAN_FRONTEND=noninteractive apt-get upgrade -y -qq -o Dpkg::Options::="--force-confnew" 2>/dev/null || true
 
 # نصب Java
 print_info "نصب Java Development Kit..."
@@ -57,34 +57,75 @@ cd "$WORK_DIR"
 
 # دانلود و استخراج
 print_info "دانلود IFIXMOBILEVPN.zip..."
-wget -q --show-progress https://github.com/Mahanfix/IFIXMOBILEVPN/raw/main/IFIXMOBILEVPN.zip -O IFIXMOBILEVPN.zip
-
-print_info "استخراج فایل..."
-unzip -q IFIXMOBILEVPN.zip -d .
-rm -f IFIXMOBILEVPN.zip
-
-print_success "فایل استخراج شد"
+if [ ! -d "app" ] || [ ! -f "build.gradle.kts" ]; then
+    wget -q --show-progress https://github.com/Mahanfix/IFIXMOBILEVPN/raw/main/IFIXMOBILEVPN.zip -O IFIXMOBILEVPN.zip
+    print_info "استخراج فایل..."
+    unzip -q -o IFIXMOBILEVPN.zip -d .
+    rm -f IFIXMOBILEVPN.zip
+    print_success "فایل استخراج شد"
+else
+    print_warning "پروژه قبلاً دانلود شده است"
+fi
 
 # نمایش ساختار
 print_info "ساختار پروژه:"
 ls -lh
 echo ""
 
-# بیلد با Gradle
-print_info "شروع بیلد Gradle..."
-if [ -f "gradlew" ]; then
-    print_info "استفاده از ./gradlew (موجود در پروژه)"
-    chmod +x gradlew
-    ./gradlew clean build -q || print_warning "بیلد ناموفق - لطفاً لاگ‌ها را بررسی کنید"
-elif command -v gradle &> /dev/null; then
-    print_info "استفاده از gradle سیستم"
-    gradle clean build -q || print_warning "بیلد ناموفق"
+# نصب Gradle
+GRADLE_HOME="/opt/gradle"
+GRADLE_VERSION="8.3"
+print_info "نصب Gradle $GRADLE_VERSION..."
+
+if [ ! -d "$GRADLE_HOME/gradle-$GRADLE_VERSION" ]; then
+    mkdir -p "$GRADLE_HOME"
+    cd "$GRADLE_HOME"
+    
+    GRADLE_URL="https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip"
+    print_info "دانلود Gradle از: $GRADLE_URL"
+    wget -q --show-progress "$GRADLE_URL"
+    
+    print_info "استخراج Gradle..."
+    unzip -q "gradle-${GRADLE_VERSION}-bin.zip"
+    rm -f "gradle-${GRADLE_VERSION}-bin.zip"
+    
+    chmod +x "gradle-${GRADLE_VERSION}/bin/gradle"
+    print_success "Gradle نصب شد"
 else
-    print_error "Gradle نصب نشده"
+    print_warning "Gradle قبلاً نصب است"
+fi
+
+# تنظیم PATH
+export PATH="$GRADLE_HOME/gradle-$GRADLE_VERSION/bin:$PATH"
+echo "export PATH=$GRADLE_HOME/gradle-$GRADLE_VERSION/bin:\$PATH" >> /etc/profile.d/gradle.sh
+source /etc/profile.d/gradle.sh
+
+# بیلد با Gradle
+cd "$WORK_DIR"
+print_info "شروع بیلد Gradle (این زمان می‌برد)..."
+print_info "لاگ بیلد برای خود را ببین..."
+
+if gradle --version > /dev/null 2>&1; then
+    print_info "gradle version: $(gradle --version | head -1)"
+    gradle clean build 2>&1 | tee build.log || {
+        print_error "بیلد ناموفق - لاگ:"
+        tail -50 build.log
+        exit 1
+    }
+else
+    print_error "Gradle به درستی نصب نشد"
     exit 1
 fi
 
 print_success "بیلد تمام شد"
+
+# بررسی JAR
+if ls build/libs/*.jar 1> /dev/null 2>&1; then
+    JAR_FILE=$(ls build/libs/*.jar | head -1)
+    print_success "JAR ایجاد شد: $(basename $JAR_FILE)"
+else
+    print_warning "هیچ JAR فایل پیدا نشد - شاید پروژه فقط کتابخانه است"
+fi
 
 # ایجاد فایل start.sh
 print_info "ایجاد فایل start.sh..."
@@ -92,19 +133,23 @@ cat > start.sh << 'STARTSCRIPT'
 #!/bin/bash
 cd "$(dirname "$0")"
 
-# لاگ فایل
 LOG_FILE="app.log"
-
 echo "$(date) - IFIXMOBILEVPN شروع شد" >> "$LOG_FILE"
 
 # بررسی فایلهای JAR
-if [ -f "build/libs/"*.jar ]; then
-    JAR_FILE=$(find build/libs -name "*.jar" | head -1)
+if ls build/libs/*.jar 1> /dev/null 2>&1; then
+    JAR_FILE=$(ls build/libs/*.jar | head -1)
     echo "$(date) - اجرای: $JAR_FILE" >> "$LOG_FILE"
-    exec java -jar "$JAR_FILE" >> "$LOG_FILE" 2>&1
+    
+    # اگر app.properties وجود دارد
+    if [ -f "app.properties" ]; then
+        exec java -jar "$JAR_FILE" --spring.config.location=file:./app.properties >> "$LOG_FILE" 2>&1
+    else
+        exec java -jar "$JAR_FILE" >> "$LOG_FILE" 2>&1
+    fi
 else
     echo "$(date) - خطا: فایل JAR پیدا نشد" >> "$LOG_FILE"
-    echo "لطفاً ابتدا ./gradlew build را اجرا کنید"
+    echo "لطفاً ابتدا gradle clean build را اجرا کنید"
     exit 1
 fi
 STARTSCRIPT
@@ -124,11 +169,13 @@ Wants=network-online.target
 Type=simple
 User=root
 WorkingDirectory=$WORK_DIR
+Environment="PATH=$GRADLE_HOME/gradle-$GRADLE_VERSION/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 ExecStart=/bin/bash $WORK_DIR/start.sh
 Restart=on-failure
 RestartSec=10
 StandardOutput=append:$WORK_DIR/app.log
 StandardError=append:$WORK_DIR/app.log
+KillMode=process
 
 [Install]
 WantedBy=multi-user.target
@@ -148,8 +195,12 @@ sleep 3
 # چک وضعیت
 if systemctl is-active --quiet ifixmobilevpn.service; then
     print_success "سرویس در حال اجرا است ✓"
+    echo ""
+    systemctl status ifixmobilevpn.service --no-pager | head -10
 else
     print_warning "سرویس اجرا نشد - لاگ‌ها را بررسی کنید"
+    echo "لاگ:"
+    tail -20 "$WORK_DIR/app.log"
 fi
 
 echo ""
@@ -158,10 +209,11 @@ print_success "✓ نصب و بیلد تمام شد!"
 echo ""
 print_info "📁 دایرکتوری: $WORK_DIR"
 print_info "☕ Java: $(java -version 2>&1 | head -n 1)"
+print_info "🔨 Gradle: $GRADLE_VERSION"
 print_info "📋 دستورات:"
-echo "  • وضعیت:    sudo systemctl status ifixmobilevpn.service"
 echo "  • لاگ:      tail -f $WORK_DIR/app.log"
+echo "  • وضعیت:    sudo systemctl status ifixmobilevpn.service"
 echo "  • متوقف:    sudo systemctl stop ifixmobilevpn.service"
 echo "  • شروع:     sudo systemctl restart ifixmobilevpn.service"
-echo "  • بیلد:     cd $WORK_DIR && ./gradlew clean build"
+echo "  • بیلد:     cd $WORK_DIR && gradle clean build"
 print_success "═══════════════════════════════════════════════════════"
