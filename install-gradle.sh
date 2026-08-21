@@ -72,38 +72,50 @@ print_info "ساختار پروژه:"
 ls -lh
 echo ""
 
+# بررسی gradle-wrapper.properties
+print_info "بررسی نسخه Gradle مورد نیاز..."
+if [ -f "gradle/wrapper/gradle-wrapper.properties" ]; then
+    REQUIRED_GRADLE=$(grep "distributionUrl" gradle/wrapper/gradle-wrapper.properties | grep -oP 'gradle-\K[0-9.]+' || echo "9.3.1")
+    print_info "نسخه Gradle مورد نیاز: $REQUIRED_GRADLE"
+else
+    REQUIRED_GRADLE="9.3.1"
+    print_warning "فایل gradle-wrapper.properties پیدا نشد - استفاده از $REQUIRED_GRADLE"
+fi
+
 # نصب Gradle
 GRADLE_HOME="/opt/gradle"
-GRADLE_VERSION="8.3"
-print_info "نصب Gradle $GRADLE_VERSION..."
+print_info "نصب Gradle $REQUIRED_GRADLE..."
 
-if [ ! -d "$GRADLE_HOME/gradle-$GRADLE_VERSION" ]; then
+if [ ! -d "$GRADLE_HOME/gradle-$REQUIRED_GRADLE" ]; then
     mkdir -p "$GRADLE_HOME"
     cd "$GRADLE_HOME"
     
-    GRADLE_URL="https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip"
+    GRADLE_URL="https://services.gradle.org/distributions/gradle-${REQUIRED_GRADLE}-bin.zip"
     print_info "دانلود Gradle از: $GRADLE_URL"
-    wget -q --show-progress "$GRADLE_URL"
+    wget -q --show-progress "$GRADLE_URL" 2>&1 || {
+        print_error "دانلود Gradle ناموفق"
+        exit 1
+    }
     
     print_info "استخراج Gradle..."
-    unzip -q "gradle-${GRADLE_VERSION}-bin.zip"
-    rm -f "gradle-${GRADLE_VERSION}-bin.zip"
+    unzip -q "gradle-${REQUIRED_GRADLE}-bin.zip"
+    rm -f "gradle-${REQUIRED_GRADLE}-bin.zip"
     
-    chmod +x "gradle-${GRADLE_VERSION}/bin/gradle"
+    chmod +x "gradle-${REQUIRED_GRADLE}/bin/gradle"
     print_success "Gradle نصب شد"
 else
     print_warning "Gradle قبلاً نصب است"
 fi
 
 # تنظیم PATH
-export PATH="$GRADLE_HOME/gradle-$GRADLE_VERSION/bin:$PATH"
-echo "export PATH=$GRADLE_HOME/gradle-$GRADLE_VERSION/bin:\$PATH" >> /etc/profile.d/gradle.sh
+export PATH="$GRADLE_HOME/gradle-$REQUIRED_GRADLE/bin:$PATH"
+echo "export PATH=$GRADLE_HOME/gradle-$REQUIRED_GRADLE/bin:\$PATH" > /etc/profile.d/gradle.sh
 source /etc/profile.d/gradle.sh
 
 # بیلد با Gradle
 cd "$WORK_DIR"
 print_info "شروع بیلد Gradle (این زمان می‌برد)..."
-print_info "لاگ بیلد برای خود را ببین..."
+print_info "لاگ بیلد:"
 
 if gradle --version > /dev/null 2>&1; then
     print_info "gradle version: $(gradle --version | head -1)"
@@ -117,14 +129,14 @@ else
     exit 1
 fi
 
-print_success "بیلد تمام شد"
+print_success "بیلد تمام شد ✓"
 
 # بررسی JAR
 if ls build/libs/*.jar 1> /dev/null 2>&1; then
     JAR_FILE=$(ls build/libs/*.jar | head -1)
-    print_success "JAR ایجاد شد: $(basename $JAR_FILE)"
+    print_success "✓ JAR ایجاد شد: $(basename $JAR_FILE)"
 else
-    print_warning "هیچ JAR فایل پیدا نشد - شاید پروژه فقط کتابخانه است"
+    print_warning "هیچ JAR فایل پیدا نشد"
 fi
 
 # ایجاد فایل start.sh
@@ -169,7 +181,7 @@ Wants=network-online.target
 Type=simple
 User=root
 WorkingDirectory=$WORK_DIR
-Environment="PATH=$GRADLE_HOME/gradle-$GRADLE_VERSION/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Environment="PATH=$GRADLE_HOME/gradle-$REQUIRED_GRADLE/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 ExecStart=/bin/bash $WORK_DIR/start.sh
 Restart=on-failure
 RestartSec=10
@@ -183,24 +195,29 @@ EOF
 
 chmod 644 /etc/systemd/system/ifixmobilevpn.service
 systemctl daemon-reload
-systemctl enable ifixmobilevpn.service 2>/dev/null
+systemctl enable ifixmobilevpn.service 2>/dev/null || print_warning "systemd نتوانست فعال شود (محیط مختلف)"
 
 print_success "سرویس ایجاد شد"
 
-# شروع سرویس
-print_info "شروع سرویس..."
-systemctl restart ifixmobilevpn.service
-sleep 3
+# شروع سرویس (اگر systemd دستیاب باشد)
+if command -v systemctl &> /dev/null && systemctl is-system-running > /dev/null 2>&1; then
+    print_info "شروع سرویس..."
+    systemctl restart ifixmobilevpn.service
+    sleep 3
 
-# چک وضعیت
-if systemctl is-active --quiet ifixmobilevpn.service; then
-    print_success "سرویس در حال اجرا است ✓"
-    echo ""
-    systemctl status ifixmobilevpn.service --no-pager | head -10
+    # چک وضعیت
+    if systemctl is-active --quiet ifixmobilevpn.service; then
+        print_success "سرویس در حال اجرا است ✓"
+        echo ""
+        systemctl status ifixmobilevpn.service --no-pager | head -10
+    else
+        print_warning "سرویس اجرا نشد - لاگ‌ها را بررسی کنید"
+        echo "لاگ:"
+        tail -20 "$WORK_DIR/app.log" 2>/dev/null || echo "هنوز لاگی تولید نشده"
+    fi
 else
-    print_warning "سرویس اجرا نشد - لاگ‌ها را بررسی کنید"
-    echo "لاگ:"
-    tail -20 "$WORK_DIR/app.log"
+    print_warning "systemd دستیاب نیست - می‌توانید دستی اجرا کنید:"
+    echo "  cd $WORK_DIR && ./start.sh"
 fi
 
 echo ""
@@ -209,11 +226,12 @@ print_success "✓ نصب و بیلد تمام شد!"
 echo ""
 print_info "📁 دایرکتوری: $WORK_DIR"
 print_info "☕ Java: $(java -version 2>&1 | head -n 1)"
-print_info "🔨 Gradle: $GRADLE_VERSION"
+print_info "🔨 Gradle: $REQUIRED_GRADLE"
 print_info "📋 دستورات:"
 echo "  • لاگ:      tail -f $WORK_DIR/app.log"
 echo "  • وضعیت:    sudo systemctl status ifixmobilevpn.service"
 echo "  • متوقف:    sudo systemctl stop ifixmobilevpn.service"
 echo "  • شروع:     sudo systemctl restart ifixmobilevpn.service"
 echo "  • بیلد:     cd $WORK_DIR && gradle clean build"
+echo "  • دستی:     cd $WORK_DIR && ./start.sh"
 print_success "═══════════════════════════════════════════════════════"
